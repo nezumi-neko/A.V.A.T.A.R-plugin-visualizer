@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<title>A.V.A.T.A.R Orb — Organique</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:transparent; overflow:hidden;
+  width:100vw; height:100vh;
+  display:flex; align-items:center; justify-content:center;
+  -webkit-app-region:no-drag;
+}
+canvas { display:block; -webkit-app-region:no-drag; }
+#close-btn {
+  position:absolute; top:10px; right:14px;
+  color:rgba(80,200,255,0.3); font-size:14px;
+  cursor:pointer; -webkit-app-region:no-drag; transition:color 0.2s;
+}
+#close-btn:hover { color:rgba(150,230,255,0.9); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="close-btn" onclick="window.close()">✕</div>
+<script>
+// ═══════════════════════════════════════════════
+//  ÉTATS
+// ═══════════════════════════════════════════════
+const STATES = {
+  idle:   { energy:0.12, repulse:1.0,  attract:0.002, noise:0.08, connDist:0.55, label:'idle'   },
+  listen: { energy:0.65, repulse:1.4,  attract:0.003, noise:0.7, connDist:0.65, label:'écoute' },
+  speak:  { energy:1.00, repulse:2.0,  attract:0.004, noise:1.4, connDist:0.80, label:'parole' }
+};
+let STATE='idle';
+let curEnergy=0.28, tgtEnergy=0.28;
+let curNoise=0.3,   tgtNoise=0.3;
+let curConn=0.55,   tgtConn=0.55;
+let audioLevel=0, audioBass=0, audioMid=0, audioTreble=0;
+
+
+// ═══════════════════════════════════════════════════
+//  AUDIO : sortie Windows + entrée micro en parallèle
+// ═══════════════════════════════════════════════════
+const AUDIO_SENSITIVITY = 2.4;
+const NOISE_GATE        = 0.035;
+
+let audioCtx = null;
+
+// Sortie audio Windows via loopback / Stereo Mix / VB-CABLE / VoiceMeeter
+let outAnalyser = null;
+let outFreqData = null;
+let outTimeData = null;
+let outStream   = null;
+
+// Entrée micro réelle
+let micAnalyser = null;
+let micFreqData = null;
+let micTimeData = null;
+let micStream   = null;
+
+let isListening = false;
+let loopbackId  = null;
+
+// Détecte Stereo Mix / What U Hear / VB-CABLE / VoiceMeeter / loopback Windows
+async function detectLoopback() {
+  try {
+    const tmpStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    tmpStream.getTracks().forEach(t => t.stop());
+
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const lb = devs.find(d => d.kind === 'audioinput' && (
+      d.label.toLowerCase().includes('stereo mix') ||
+      d.label.toLowerCase().includes('mélange stéréo') ||
+      d.label.toLowerCase().includes('melange stereo') ||
+      d.label.toLowerCase().includes('what u hear') ||
+      d.label.toLowerCase().includes('wave out mix') ||
+      d.label.toLowerCase().includes('loopback') ||
+      d.label.toLowerCase().includes('cable output') ||
+      d.label.toLowerCase().includes('vb-audio') ||
+      d.label.toLowerCase().includes('voicemeeter output') ||
+      d.label.toLowerCase().includes('voicemeeter aux output') ||
+      d.label.toLowerCase().includes('voicemeeter vaio')
+    ));
+
+    if (lb) { loopbackId = lb.deviceId; console.log('Loopback détecté:', lb.label); }
+    else    { console.log('Aucun loopback détecté — micro uniquement'); }
+  } catch(e) { console.warn('detectLoopback:', e); }
+}
+detectLoopback();
+
+function createAnalyser() {
+  const a = audioCtx.createAnalyser();
+  a.fftSize = 1024;
+  a.minDecibels = -90;
+  a.maxDecibels = -10;
+  a.smoothingTimeConstant = 0.35;
+  return a;
+}
+
+async function openAudioInput(deviceId) {
+  const constraints = deviceId
+    ? { audio: { deviceId: { exact: deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false }
+    : { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false };
+
+  try {
+    return await navigator.mediaDevices.getUserMedia(constraints);
+  } catch(e) {
+    return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  }
+}
+
+async function startAudio(deviceId) {
+  if (isListening) return;
+
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.warn('visualizer: getUserMedia indisponible');
+      return;
+    }
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    // 1) Micro toujours actif
+    micStream = await openAudioInput(null);
+    micAnalyser = createAnalyser();
+    micFreqData = new Uint8Array(micAnalyser.frequencyBinCount);
+    micTimeData = new Uint8Array(micAnalyser.fftSize);
+    audioCtx.createMediaStreamSource(micStream).connect(micAnalyser);
+    console.log('Micro surveillé');
+
+    // 2) Sortie audio si périphérique disponible
+    const outputId = deviceId || loopbackId;
+    if (outputId) {
+      try {
+        outStream = await openAudioInput(outputId);
+        outAnalyser = createAnalyser();
+        outFreqData = new Uint8Array(outAnalyser.frequencyBinCount);
+        outTimeData = new Uint8Array(outAnalyser.fftSize);
+        audioCtx.createMediaStreamSource(outStream).connect(outAnalyser);
+        console.log('Sortie audio surveillée');
+      } catch(e) {
+        console.warn('Sortie audio non disponible, micro seul:', e);
+      }
+    }
+
+    isListening = true;
+  } catch(e) {
+    console.warn('visualizer: audio non disponible', e);
+  }
+}
+
+function stopAudio() {
+  isListening = false;
+
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (outStream) { outStream.getTracks().forEach(t => t.stop()); outStream = null; }
+
+  if (audioCtx) {
+    audioCtx.close();
+    audioCtx = null;
+  }
+
+  micAnalyser = null;
+  outAnalyser = null;
+}
+
+function avgFreqFrom(analyser, freqData, minHz, maxHz) {
+  if (!analyser || !audioCtx || !freqData) return 0;
+  const nyquist = audioCtx.sampleRate / 2;
+  const start = Math.max(0, Math.floor(minHz / nyquist * freqData.length));
+  const end   = Math.min(freqData.length - 1, Math.ceil(maxHz / nyquist * freqData.length));
+  let sum = 0, count = 0;
+  for (let i = start; i <= end; i++) { sum += freqData[i]; count++; }
+  return count ? Math.min(1, (sum / count) / 180) : 0;
+}
+
+function metricsFrom(analyser, freqData, timeData) {
+  if (!analyser || !freqData || !timeData) {
+    return { level: 0, bass: 0, mid: 0, treble: 0 };
+  }
+
+  analyser.getByteTimeDomainData(timeData);
+  analyser.getByteFrequencyData(freqData);
+
+  let sum = 0;
+  for (let i = 0; i < timeData.length; i++) {
+    const v = (timeData[i] - 128) / 128;
+    sum += v * v;
+  }
+
+  let rms = Math.sqrt(sum / timeData.length);
+  let level = Math.max(0, (rms - NOISE_GATE) * AUDIO_SENSITIVITY);
+  level = Math.min(1, Math.pow(level, 0.72));
+
+  const bass   = avgFreqFrom(analyser, freqData, 20,   250);
+  const mid    = avgFreqFrom(analyser, freqData, 250,  2200);
+  const treble = avgFreqFrom(analyser, freqData, 2200, 9000);
+
+  if (level < NOISE_GATE) {
+    level = 0;
+  }
+
+  return { level, bass, mid, treble };
+}
+
+function getAudioMetrics() {
+  if (!isListening) return { level: 0, bass: 0, mid: 0, treble: 0 };
+
+  const mic = metricsFrom(micAnalyser, micFreqData, micTimeData);
+  const out = metricsFrom(outAnalyser, outFreqData, outTimeData);
+
+  let level  = Math.max(mic.level,  out.level);
+  let bass   = Math.max(mic.bass,   out.bass);
+  let mid    = Math.max(mic.mid,    out.mid);
+  let treble = Math.max(mic.treble, out.treble);
+
+  if (level < NOISE_GATE) {
+    level = 0;
+    bass = 0;
+    mid = 0;
+    treble = 0;
+  }
+
+  return { level, bass, mid, treble };
+}
+
+
+function processAudio() {
+  const m = getAudioMetrics();
+
+  const atk = m.level > audioLevel ? 0.55 : 0.45;
+  audioLevel = audioLevel * (1 - atk) + m.level * atk;
+
+  if (m.level < 0.035) audioLevel *= 0.08;
+
+  audioBass   = m.bass   > audioBass   ? audioBass   * 0.55 + m.bass   * 0.45 : audioBass   * 0.38 + m.bass   * 0.62;
+  audioMid    = m.mid    > audioMid    ? audioMid    * 0.58 + m.mid    * 0.42 : audioMid    * 0.38 + m.mid    * 0.62;
+  audioTreble = m.treble > audioTreble ? audioTreble * 0.62 + m.treble * 0.38 : audioTreble * 0.35 + m.treble * 0.65;
+
+  if (m.level < 0.035) {
+    audioBass *= 0.05;
+    audioMid *= 0.05;
+    audioTreble *= 0.05;
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  CANVAS
+// ═══════════════════════════════════════════════
+const cv=document.getElementById('c');
+const ctx=cv.getContext('2d');
+let W,H,CX,CY,BOUND;
+let nodes=[];
+
+function resize(){
+  W=cv.width=window.innerWidth; H=cv.height=window.innerHeight;
+  CX=W/2; CY=H/2; BOUND=Math.min(W,H)*0.44;
+  buildNodes();
+}
+window.addEventListener('resize',resize);
+
+function buildNodes(){
+  const N=28;
+  nodes=Array.from({length:N},(_,i)=>{
+    const a=Math.random()*Math.PI*2;
+    const r=(0.2+Math.random()*0.75)*BOUND;
+    return {
+      x:CX+Math.cos(a)*r, y:CY+Math.sin(a)*r,
+      vx:(Math.random()-0.5)*0.5, vy:(Math.random()-0.5)*0.5,
+      size:2+Math.random()*3.5,
+      phase:Math.random()*Math.PI*2,
+      orbit:Math.random()<0.35,
+      orbitA:Math.random()*Math.PI*2,
+      orbitR:r, orbitSpeed:(Math.random()-0.5)*0.012
+    };
+  });
+  nodes.push({x:CX,y:CY,vx:0,vy:0,size:7,phase:0,orbit:false,isCenter:true});
+}
+
+const t0=performance.now();
+function draw(){
+  requestAnimationFrame(draw);
+  processAudio();
+  const T=(performance.now()-t0)/1000;
+  const cfg=STATES[STATE];
+
+  const E=tgtEnergy+audioLevel*0.45+audioBass*0.25;
+  curEnergy+=(E-curEnergy)*0.04;
+  curNoise+=(tgtNoise-curNoise)*0.03;
+  curConn+=(tgtConn-curConn)*0.03;   // corrigé : tgtConn-curConn (bug orb3 original)
+
+  ctx.clearRect(0,0,W,H);
+
+  const haloR=BOUND*(0.7+curEnergy*0.4+audioBass*0.25);
+  const halo=ctx.createRadialGradient(CX,CY,0,CX,CY,haloR);
+  halo.addColorStop(0,`rgba(0,180,255,${0.10*curEnergy})`);
+  halo.addColorStop(0.4,`rgba(0,80,200,${0.04*curEnergy})`);
+  halo.addColorStop(1,'transparent');
+  ctx.fillStyle=halo; ctx.fillRect(0,0,W,H);
+
+  nodes.forEach((n,i)=>{
+    if(n.isCenter) return;
+    if(n.orbit){
+      n.orbitA+=n.orbitSpeed*(0.5+curEnergy*1.5);
+      const rr=n.orbitR*(1+audioBass*0.25+Math.sin(T*0.8+n.phase)*0.05*curEnergy);
+      n.x=CX+Math.cos(n.orbitA)*rr;
+      n.y=CY+Math.sin(n.orbitA)*rr;
+    } else {
+      const dx=CX-n.x,dy=CY-n.y;
+      n.vx+=dx*cfg.attract*(1+audioLevel*1.5);
+      n.vy+=dy*cfg.attract*(1+audioLevel*1.5);
+      nodes.forEach((m,j)=>{
+        if(i===j||m.isCenter)return;
+        const ex=n.x-m.x,ey=n.y-m.y,ed=Math.sqrt(ex*ex+ey*ey)+0.01;
+        if(ed<BOUND*0.28){
+          const f=cfg.repulse*(1+audioBass*1.2)/(ed*ed)*55;
+          n.vx+=ex*f; n.vy+=ey*f;
+        }
+      });
+      n.vx+=Math.sin(T*0.6+n.phase)*0.35*curEnergy*(1+audioMid);
+      n.vy+=Math.cos(T*0.45+n.phase*1.3)*0.35*curEnergy*(1+audioMid);
+      n.vx*=0.88; n.vy*=0.88;
+      n.x+=n.vx; n.y+=n.vy;
+      const bd=Math.sqrt((n.x-CX)**2+(n.y-CY)**2);
+      if(bd>BOUND*0.94){
+        n.x=CX+(n.x-CX)/bd*BOUND*0.94;
+        n.y=CY+(n.y-CY)/bd*BOUND*0.94;
+        n.vx*=-0.5; n.vy*=-0.5;
+      }
+    }
+  });
+
+  const maxD=BOUND*(0.52+curEnergy*0.22+audioLevel*0.12);
+  nodes.forEach((n,i)=>{
+    nodes.forEach((m,j)=>{
+      if(j<=i)return;
+      const dx=n.x-m.x,dy=n.y-m.y,d=Math.sqrt(dx*dx+dy*dy);
+      if(d>maxD)return;
+      const proximity=1-d/maxD;
+      const pulse=0.5+0.5*Math.sin(T*(1+curEnergy)+(n.phase||0)+(m.phase||0)*0.5);
+      const alpha=proximity*(0.12+curEnergy*0.28+audioMid*0.15)*pulse;
+      const grad=ctx.createLinearGradient(n.x,n.y,m.x,m.y);
+      grad.addColorStop(0,`rgba(0,210,255,${alpha})`);
+      grad.addColorStop(0.5,`rgba(100,240,255,${alpha*1.4})`);
+      grad.addColorStop(1,`rgba(0,160,220,${alpha})`);
+      ctx.strokeStyle=grad;
+      ctx.lineWidth=0.5+proximity*1.5*curEnergy+audioTreble*0.8;
+      ctx.beginPath(); ctx.moveTo(n.x,n.y); ctx.lineTo(m.x,m.y); ctx.stroke();
+    });
+  });
+
+  nodes.forEach(n=>{
+    const pulse=0.5+0.5*Math.sin(T*(n.isCenter?2.5:n.speed||1)+n.phase);
+    const act=0.35+pulse*0.55*curEnergy+audioLevel*(n.isCenter?0.6:0.35);
+    const nr=n.size*(1+pulse*0.7*curEnergy+audioBass*(n.isCenter?0.5:0.3));
+    const glowR=nr*(n.isCenter?6:5);
+    const g=ctx.createRadialGradient(n.x,n.y,0,n.x,n.y,glowR);
+    g.addColorStop(0,`rgba(${n.isCenter?'100,230':'0,200'},255,${act*0.8})`);
+    g.addColorStop(0.35,`rgba(0,100,220,${act*0.25*curEnergy})`);
+    g.addColorStop(1,'transparent');
+    ctx.fillStyle=g; ctx.fillRect(n.x-glowR,n.y-glowR,glowR*2,glowR*2);
+    if(n.isCenter){
+      ctx.fillStyle=`rgba(200,245,255,${0.6+act*0.4})`;
+      ctx.beginPath(); ctx.arc(n.x,n.y,nr*0.8,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle=`rgba(255,255,255,${0.5+pulse*0.5})`;
+      ctx.beginPath(); ctx.arc(n.x,n.y,nr*0.35,0,Math.PI*2); ctx.fill();
+    } else {
+      ctx.fillStyle=`rgba(160,235,255,${0.7+act*0.3})`;
+      ctx.beginPath(); ctx.arc(n.x,n.y,Math.max(0.8,nr*0.55),0,Math.PI*2); ctx.fill();
+    }
+  });
+
+  ctx.strokeStyle=`rgba(0,160,255,${0.12+curEnergy*0.18+audioTreble*0.2})`;
+  ctx.lineWidth=0.8;
+  ctx.beginPath(); ctx.arc(CX,CY,BOUND,0,Math.PI*2); ctx.stroke();
+}
+
+// ═══════════════════════════════════════════════
+//  DRAG + BLUR
+// ═══════════════════════════════════════════════
+let isDragging=false,dragX=0,dragY=0;
+cv.addEventListener('mousedown',e=>{if(e.button!==0)return;isDragging=true;dragX=e.screenX;dragY=e.screenY;});
+window.addEventListener('mousemove',e=>{
+  if(!isDragging)return;
+  if(window.avatarBridge&&window.avatarBridge.moveWindow)
+    window.avatarBridge.moveWindow(e.screenX-dragX,e.screenY-dragY);
+  dragX=e.screenX;dragY=e.screenY;
+});
+window.addEventListener('mouseup',()=>isDragging=false);
+
+// Double-clic : bascule plein écran
+cv.addEventListener('dblclick', () => {
+  if (window.avatarBridge?.toggleFullscreen) window.avatarBridge.toggleFullscreen();
+});
+// Clic droit : idem
+cv.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (window.avatarBridge?.toggleFullscreen) window.avatarBridge.toggleFullscreen();
+});
+
+window.addEventListener('blur',()=>{if(window.avatarBridge)window.avatarBridge.sendToBack();});
+
+// ═══════════════════════════════════════════════
+//  ÉTAT AVATAR
+// ═══════════════════════════════════════════════
+let stopTimer=null;
+function setState(s){
+  STATE=s;
+  const cfg=STATES[s]||STATES.idle;
+  tgtEnergy=cfg.energy; tgtNoise=cfg.noise; tgtConn=cfg.connDist;
+  if(stopTimer){clearTimeout(stopTimer);stopTimer=null;}
+  if(s==='listen') {
+    startAudio(null);                       // micro
+  } else if(s==='speak') {
+    startAudio(loopbackId||null);           // loopback Windows, fallback micro
+  } else {
+    startAudio(null);                       // idle : micro ambiant
+  }
+}
+
+if(window.avatarBridge){
+  window.avatarBridge.onState(setState);
+}
+window.addEventListener('message',e=>{if(e.data&&e.data.orbState)setState(e.data.orbState);});
+document.addEventListener('keydown',e=>{
+  if(e.key==='1')setState('idle');
+  else if(e.key==='2')setState('listen');
+  else if(e.key==='3')setState('speak');
+  else if(e.key==='F11'){if(window.avatarBridge?.toggleFullscreen)window.avatarBridge.toggleFullscreen();}
+});
+window.addEventListener('load',()=>setTimeout(()=>setState('speak'),600));
+window.addEventListener('pointerdown',()=>{
+  setState('speak');
+  if(audioCtx&&audioCtx.state==='suspended')audioCtx.resume();
+});
+window.addEventListener('beforeunload',stopAudio);
+
+resize();
+draw();
+</script>
+</body>
+</html>

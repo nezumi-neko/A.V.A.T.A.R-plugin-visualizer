@@ -1,0 +1,34 @@
+{
+	"modules":{
+		"visualizer":{
+			"version":"1.1",
+			"name":"Visualizer",
+			"autoOpen":true,
+			"orbStyle":1,
+			"opacity":0.95,
+			"window":{
+				"x":50,
+				"y":50,
+				"width":400,
+				"height":400,
+				"alwaysOnTop":true
+			},"widget":{
+				"display":true
+			},
+			"rules":{
+				"open":["open * visualizer","open * orb","show * visualizer","show * orb","display * visualizer","display * orb"],
+				"close":["close * visualizer","close * orb","hide * visualizer","hide * orb"],
+				"setOrb1":["orb * one","orb * style one","visualizer * one","orb * sphere","orb * webgl"],
+				"setOrb2":["orb * two","orb * style two","visualizer * two","orb * graph","orb * network"],
+				"setOrb3":["orb * three","orb * style three","visualizer * three","orb * organic","orb * particles"],
+				"setOrb4":["orb * four","orb * style four","visualizer * four","orb * matrice","orb * matrix"],
+				"setOrb5":["orb * five","orb * style five","visualizer * five","orb * Oscilloscope"],
+				"setOrb6":["orb * six","orb * style six","visualizer * six","orb * Plasma"],
+				"setOrb7":["orb * seven","orb * style seven","visualizer * seven","orb * Constellation"],
+				"setOrb8":["orb * heigt","orb * style heigt","visualizer * heigt","orb * Vortex"],
+				"setOrb9":["orb * nine","orb * style nine","visualizer * nine","orb * Equalizer"],
+				"setOrb10":["orb * ten","orb * style ten","visualizer * ten","orb * Water","orb * Ripple"]
+			}
+		}
+	}
+}

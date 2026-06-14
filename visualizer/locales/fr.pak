@@ -1,0 +1,19 @@
+{
+    "plugin": {
+        "from": "depuis"
+    },
+    "visualizer": {
+        "opened":"Visualiseur ouvert.",
+        "closed":"Visualiseur fermé.",
+        "orbChanged1":"Style d'orbe un activé.",
+        "orbChanged2":"Style d'orbe deux activé.",
+        "orbChanged3":"Style d'orbe trois activé.",
+        "orbChanged4":"Style Matrix activé.",
+		"orbChanged5":"Style Oscilloscope circulaire.",
+		"orbChanged6":"Style Feu plasma.",
+		"orbChanged7":"Style Constellation.",
+		"orbChanged8":"Style Vortex tunnel.",
+		"orbChanged9":"Style Égaliseur circulaire.",
+		"orbChanged10":"Style Eau / Ripple."
+    }
+}

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<title>A.V.A.T.A.R Orb 6 — Feu Plasma</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:transparent; overflow:hidden; width:100vw; height:100vh; -webkit-app-region:no-drag; }
+  canvas { display:block; -webkit-app-region:no-drag; }
+  #close-btn { position:absolute; top:10px; right:14px; color:rgba(255,120,0,0.3); font-size:14px; cursor:pointer; -webkit-app-region:no-drag; transition:color 0.2s; font-family:monospace; }
+  #close-btn:hover { color:rgba(255,200,0,0.9); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="close-btn" onclick="window.close()">✕</div>
+<script>
+// ═══════════════════════════════════════════════
+//  ÉTATS
+// ═══════════════════════════════════════════════
+const STATES = {
+  idle:   { hueBase:260, hueRange:60,  height:0.22, turbulence:0.8,  brightness:0.5,  particles:18, label:'idle'   },
+  listen: { hueBase:20,  hueRange:40,  height:0.40, turbulence:1.4,  brightness:0.75, particles:32, label:'écoute' },
+  speak:  { hueBase:10,  hueRange:30,  height:0.65, turbulence:2.2,  brightness:1.0,  particles:55, label:'parole' }
+};
+let cur={...STATES.idle}, tgt={...STATES.idle};
+function lerp(a,b,t){return a+(b-a)*t;}
+function interpolate(){
+  const s=0.03, sf=0.015;
+  cur.hueBase    =lerp(cur.hueBase,    tgt.hueBase,    s);
+  cur.hueRange   =lerp(cur.hueRange,   tgt.hueRange,   s);
+  cur.height     =lerp(cur.height,     tgt.height,     sf);
+  cur.turbulence =lerp(cur.turbulence, tgt.turbulence, sf);
+  cur.brightness =lerp(cur.brightness, tgt.brightness, s);
+  cur.particles  =lerp(cur.particles,  tgt.particles,  s);
+}
+
+// ═══════════════════════════════════════════════
+//  AUDIO (identique orb1)
+// ═══════════════════════════════════════════════
+const AUDIO_SENSITIVITY=2.4, NOISE_GATE=0.035;
+let audioCtx=null,outAnalyser=null,outFreqData=null,outTimeData=null,outStream=null;
+let micAnalyser=null,micFreqData=null,micTimeData=null,micStream=null;
+let isListening=false,loopbackId=null;
+let audioLevel=0,audioBass=0,audioMid=0,audioTreble=0;
+async function detectLoopback(){
+  try{const tmp=await navigator.mediaDevices.getUserMedia({audio:true,video:false});tmp.getTracks().forEach(t=>t.stop());
+  const devs=await navigator.mediaDevices.enumerateDevices();
+  const lb=devs.find(d=>d.kind==='audioinput'&&(d.label.toLowerCase().includes('stereo mix')||d.label.toLowerCase().includes('mélange stéréo')||d.label.toLowerCase().includes('melange stereo')||d.label.toLowerCase().includes('what u hear')||d.label.toLowerCase().includes('wave out mix')||d.label.toLowerCase().includes('loopback')||d.label.toLowerCase().includes('cable output')||d.label.toLowerCase().includes('vb-audio')||d.label.toLowerCase().includes('voicemeeter output')||d.label.toLowerCase().includes('voicemeeter aux output')||d.label.toLowerCase().includes('voicemeeter vaio')));
+  if(lb)loopbackId=lb.deviceId;}catch(e){}
+}
+detectLoopback();
+function createAnalyser(){const a=audioCtx.createAnalyser();a.fftSize=1024;a.minDecibels=-90;a.maxDecibels=-10;a.smoothingTimeConstant=0.35;return a;}
+async function openAudioInput(deviceId){const c=deviceId?{audio:{deviceId:{exact:deviceId},echoCancellation:false,noiseSuppression:false,autoGainControl:false},video:false}:{audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},video:false};try{return await navigator.mediaDevices.getUserMedia(c);}catch(e){return await navigator.mediaDevices.getUserMedia({audio:true,video:false});}}
+async function startAudio(deviceId){
+  if(isListening)return;
+  try{if(!navigator.mediaDevices?.getUserMedia)return;
+  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state==='suspended')await audioCtx.resume();
+  micStream=await openAudioInput(null);micAnalyser=createAnalyser();micFreqData=new Uint8Array(micAnalyser.frequencyBinCount);micTimeData=new Uint8Array(micAnalyser.fftSize);audioCtx.createMediaStreamSource(micStream).connect(micAnalyser);
+  const outputId=deviceId||loopbackId;
+  if(outputId){try{outStream=await openAudioInput(outputId);outAnalyser=createAnalyser();outFreqData=new Uint8Array(outAnalyser.frequencyBinCount);outTimeData=new Uint8Array(outAnalyser.fftSize);audioCtx.createMediaStreamSource(outStream).connect(outAnalyser);}catch(e){}}
+  isListening=true;}catch(e){}
+}
+function stopAudio(){isListening=false;if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}if(outStream){outStream.getTracks().forEach(t=>t.stop());outStream=null;}if(audioCtx){audioCtx.close();audioCtx=null;}micAnalyser=null;outAnalyser=null;}
+function avgFreqFrom(analyser,freqData,minHz,maxHz){if(!analyser||!audioCtx||!freqData)return 0;const nyquist=audioCtx.sampleRate/2;const start=Math.max(0,Math.floor(minHz/nyquist*freqData.length));const end=Math.min(freqData.length-1,Math.ceil(maxHz/nyquist*freqData.length));let sum=0,count=0;for(let i=start;i<=end;i++){sum+=freqData[i];count++;}return count?Math.min(1,(sum/count)/180):0;}
+function metricsFrom(analyser,freqData,timeData){if(!analyser||!freqData||!timeData)return{level:0,bass:0,mid:0,treble:0};analyser.getByteTimeDomainData(timeData);analyser.getByteFrequencyData(freqData);let sum=0;for(let i=0;i<timeData.length;i++){const v=(timeData[i]-128)/128;sum+=v*v;}let rms=Math.sqrt(sum/timeData.length);let level=Math.max(0,(rms-NOISE_GATE)*AUDIO_SENSITIVITY);level=Math.min(1,Math.pow(level,0.72));const bass=avgFreqFrom(analyser,freqData,20,250);const mid=avgFreqFrom(analyser,freqData,250,2200);const treble=avgFreqFrom(analyser,freqData,2200,9000);if(level<NOISE_GATE)level=0;return{level,bass,mid,treble};}
+function getAudioMetrics(){if(!isListening)return{level:0,bass:0,mid:0,treble:0};const mic=metricsFrom(micAnalyser,micFreqData,micTimeData);const out=metricsFrom(outAnalyser,outFreqData,outTimeData);let level=Math.max(mic.level,out.level),bass=Math.max(mic.bass,out.bass),mid=Math.max(mic.mid,out.mid),treble=Math.max(mic.treble,out.treble);if(level<NOISE_GATE){level=0;bass=0;mid=0;treble=0;}return{level,bass,mid,treble};}
+function processAudio(){const m=getAudioMetrics();if(m.level<0.035){m.level=0;m.bass=0;m.mid=0;m.treble=0;}const atk=m.level>audioLevel?0.55:0.45;audioLevel=audioLevel*(1-atk)+m.level*atk;if(m.level<0.035)audioLevel*=0.08;audioBass=m.bass>audioBass?audioBass*0.55+m.bass*0.45:audioBass*0.38+m.bass*0.62;audioMid=m.mid>audioMid?audioMid*0.58+m.mid*0.42:audioMid*0.38+m.mid*0.62;audioTreble=m.treble>audioTreble?audioTreble*0.62+m.treble*0.38:audioTreble*0.35+m.treble*0.65;if(m.level<0.035){audioBass*=0.05;audioMid*=0.05;audioTreble*=0.05;}}
+
+// ═══════════════════════════════════════════════
+//  PARTICULES FEU
+// ═══════════════════════════════════════════════
+const cv=document.getElementById('c');
+const ctx=cv.getContext('2d');
+let W,H,CX,CY,R;
+function resize(){W=cv.width=window.innerWidth;H=cv.height=window.innerHeight;CX=W/2;CY=H/2;R=Math.min(W,H)*0.32;}
+window.addEventListener('resize',resize);
+
+// Particules feu
+const MAX_PARTICLES=120;
+const particles=[];
+function makeParticle(){
+  const angle=Math.random()*Math.PI*2;
+  const r=R*(0.1+Math.random()*0.5);
+  return{
+    x:CX+Math.cos(angle)*r*0.6,
+    y:CY+Math.sin(angle)*r*0.6,
+    vx:(Math.random()-0.5)*1.2,
+    vy:-(0.8+Math.random()*2.5),
+    life:1.0,
+    decay:0.008+Math.random()*0.018,
+    size:2+Math.random()*8,
+    angle,r,
+    hueOff:Math.random()*40-20
+  };
+}
+for(let i=0;i<40;i++)particles.push(makeParticle());
+
+// Bruit de Perlin simplifié pour turbulence
+function noise2(x,y,t){return Math.sin(x*2.1+t)*Math.cos(y*1.8+t*0.7)+Math.sin(x*4.3+t*1.3)*Math.cos(y*3.9+t*0.4)*0.5;}
+
+const t0=performance.now();
+function draw(){
+  requestAnimationFrame(draw);
+  processAudio();
+  interpolate();
+  const T=(performance.now()-t0)/1000;
+
+  ctx.clearRect(0,0,W,H);
+
+  // Halo de base
+  const haloR=R*(1.4+audioLevel*0.6+audioBass*0.5);
+  const halo=ctx.createRadialGradient(CX,CY,0,CX,CY,haloR);
+  halo.addColorStop(0,`hsla(${cur.hueBase},90%,${cur.brightness*60}%,${0.15+audioLevel*0.2})`);
+  halo.addColorStop(0.5,`hsla(${cur.hueBase+20},80%,${cur.brightness*40}%,${0.06+audioLevel*0.08})`);
+  halo.addColorStop(1,'transparent');
+  ctx.fillStyle=halo; ctx.fillRect(0,0,W,H);
+
+  // Spawner particules
+  const nSpawn=Math.round(cur.particles*(1+audioLevel*2+audioBass*1.5));
+  while(particles.length<Math.min(MAX_PARTICLES,nSpawn))particles.push(makeParticle());
+
+  // Mise à jour et rendu particules
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    // Turbulence audio
+    const turb=cur.turbulence*(1+audioMid*2+audioBass*1.5);
+    p.vx+=noise2(p.x/80,p.y/80,T)*0.15*turb;
+    p.vy-=(0.03+audioBass*0.08)*turb;
+    p.vy*=0.97; p.vx*=0.96;
+    p.x+=p.vx; p.y+=p.vy;
+    p.life-=p.decay*(1+audioLevel*0.5);
+    if(p.life<=0){particles.splice(i,1);continue;}
+
+    // Couleur : base hueBase, vers jaune/blanc au sommet de vie
+    const lifeInv=1-p.life;
+    const hue=cur.hueBase+p.hueOff+lifeInv*cur.hueRange;
+    const sat=90+p.life*10;
+    const light=cur.brightness*(30+lifeInv*60)+audioLevel*10;
+    const alpha=p.life*(0.6+audioLevel*0.3);
+    const size=p.size*(p.life*0.7+0.3)*(1+audioBass*0.6);
+
+    const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,size*2);
+    g.addColorStop(0,`hsla(${hue+cur.hueRange*0.5},${sat}%,${Math.min(95,light+30)}%,${alpha})`);
+    g.addColorStop(0.4,`hsla(${hue},${sat}%,${Math.min(80,light)}%,${alpha*0.6})`);
+    g.addColorStop(1,'transparent');
+    ctx.fillStyle=g;
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,size*2,0,Math.PI*2);
+    ctx.fill();
+  }
+
+  // Noyau central
+  const coreR=R*(0.15+audioLevel*0.18+audioBass*0.12);
+  const core=ctx.createRadialGradient(CX,CY,0,CX,CY,coreR);
+  core.addColorStop(0,`hsla(${cur.hueBase+cur.hueRange},100%,95%,${0.8+audioLevel*0.2})`);
+  core.addColorStop(0.3,`hsla(${cur.hueBase+cur.hueRange*0.5},100%,${60+audioLevel*30}%,${0.6+audioLevel*0.3})`);
+  core.addColorStop(1,'transparent');
+  ctx.fillStyle=core;
+  ctx.shadowBlur=20+audioLevel*40;
+  ctx.shadowColor=`hsla(${cur.hueBase+cur.hueRange},100%,60%,1)`;
+  ctx.fillRect(0,0,W,H);
+  ctx.shadowBlur=0;
+}
+
+// DRAG + FULLSCREEN
+let isDragging=false,dragX=0,dragY=0;
+cv.addEventListener('mousedown',e=>{if(e.button!==0)return;isDragging=true;dragX=e.screenX;dragY=e.screenY;});
+window.addEventListener('mousemove',e=>{if(!isDragging)return;if(window.avatarBridge?.moveWindow)window.avatarBridge.moveWindow(e.screenX-dragX,e.screenY-dragY);dragX=e.screenX;dragY=e.screenY;});
+window.addEventListener('mouseup',()=>isDragging=false);
+cv.addEventListener('dblclick',()=>{if(window.avatarBridge?.toggleFullscreen)window.avatarBridge.toggleFullscreen();});
+cv.addEventListener('contextmenu',e=>{e.preventDefault();if(window.avatarBridge?.toggleFullscreen)window.avatarBridge.toggleFullscreen();});
+window.addEventListener('blur',()=>{if(window.avatarBridge)window.avatarBridge.sendToBack();});
+
+// ÉTAT AVATAR
+function setState(s){tgt={...STATES[s]||STATES.idle};if(s==='listen')startAudio(null);else if(s==='speak')startAudio(loopbackId||null);else startAudio(null);}
+if(window.avatarBridge)window.avatarBridge.onState(setState);
+window.addEventListener('message',e=>{if(e.data?.orbState)setState(e.data.orbState);});
+document.addEventListener('keydown',e=>{if(e.key==='1')setState('idle');else if(e.key==='2')setState('listen');else if(e.key==='3')setState('speak');else if(e.key==='F11'){if(window.avatarBridge?.toggleFullscreen)window.avatarBridge.toggleFullscreen();}});
+window.addEventListener('load',()=>setTimeout(()=>setState('idle'),600));
+window.addEventListener('pointerdown',()=>{if(audioCtx?.state==='suspended')audioCtx.resume();});
+window.addEventListener('beforeunload',stopAudio);
+resize();
+draw();
+</script>
+</body>
+</html>

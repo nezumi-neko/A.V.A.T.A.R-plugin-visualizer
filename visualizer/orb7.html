@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<title>A.V.A.T.A.R Orb 7 — Constellation</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:transparent; overflow:hidden; width:100vw; height:100vh; -webkit-app-region:no-drag; }
+  canvas { display:block; -webkit-app-region:no-drag; }
+  #close-btn { position:absolute; top:10px; right:14px; color:rgba(200,180,255,0.3); font-size:14px; cursor:pointer; -webkit-app-region:no-drag; transition:color 0.2s; font-family:monospace; }
+  #close-btn:hover { color:rgba(220,200,255,0.9); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="close-btn" onclick="window.close()">✕</div>
+<script>
+// ═══════════════════════════════════════════════
+//  ÉTATS
+// ═══════════════════════════════════════════════
+const STATES = {
+  idle:   { starBright:0.35, connAlpha:0.10, rotSpeed:0.04, nebula:0.08, starSize:1.2, shootRate:0.002, label:'idle'   },
+  listen: { starBright:0.65, connAlpha:0.22, rotSpeed:0.12, nebula:0.20, starSize:1.8, shootRate:0.012, label:'écoute' },
+  speak:  { starBright:1.00, connAlpha:0.45, rotSpeed:0.25, nebula:0.40, starSize:2.8, shootRate:0.035, label:'parole' }
+};
+let cur={...STATES.idle}, tgt={...STATES.idle};
+function lerp(a,b,t){return a+(b-a)*t;}
+function interpolate(){
+  const s=0.03, sf=0.012;
+  cur.starBright =lerp(cur.starBright, tgt.starBright, s);
+  cur.connAlpha  =lerp(cur.connAlpha,  tgt.connAlpha,  s);
+  cur.rotSpeed   =lerp(cur.rotSpeed,   tgt.rotSpeed,   sf);
+  cur.nebula     =lerp(cur.nebula,     tgt.nebula,     s);
+  cur.starSize   =lerp(cur.starSize,   tgt.starSize,   s);
+  cur.shootRate  =lerp(cur.shootRate,  tgt.shootRate,  s);
+}
+
+// ═══════════════════════════════════════════════
+//  AUDIO (identique orb1)
+// ═══════════════════════════════════════════════
+const AUDIO_SENSITIVITY=2.4,NOISE_GATE=0.035;
+let audioCtx=null,outAnalyser=null,outFreqData=null,outTimeData=null,outStream=null;
+let micAnalyser=null,micFreqData=null,micTimeData=null,micStream=null;
+let isListening=false,loopbackId=null;
+let audioLevel=0,audioBass=0,audioMid=0,audioTreble=0;
+async function detectLoopback(){try{const tmp=await navigator.mediaDevices.getUserMedia({audio:true,video:false});tmp.getTracks().forEach(t=>t.stop());const devs=await navigator.mediaDevices.enumerateDevices();const lb=devs.find(d=>d.kind==='audioinput'&&(d.label.toLowerCase().includes('stereo mix')||d.label.toLowerCase().includes('mélange stéréo')||d.label.toLowerCase().includes('melange stereo')||d.label.toLowerCase().includes('what u hear')||d.label.toLowerCase().includes('wave out mix')||d.label.toLowerCase().includes('loopback')||d.label.toLowerCase().includes('cable output')||d.label.toLowerCase().includes('vb-audio')||d.label.toLowerCase().includes('voicemeeter output')||d.label.toLowerCase().includes('voicemeeter aux output')||d.label.toLowerCase().includes('voicemeeter vaio')));if(lb)loopbackId=lb.deviceId;}catch(e){}}
+detectLoopback();
+function createAnalyser(){const a=audioCtx.createAnalyser();a.fftSize=1024;a.minDecibels=-90;a.maxDecibels=-10;a.smoothingTimeConstant=0.35;return a;}
+async function openAudioInput(deviceId){const c=deviceId?{audio:{deviceId:{exact:deviceId},echoCancellation:false,noiseSuppression:false,autoGainControl:false},video:false}:{audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},video:false};try{return await navigator.mediaDevices.getUserMedia(c);}catch(e){return await navigator.mediaDevices.getUserMedia({audio:true,video:false});}}
+async function startAudio(deviceId){if(isListening)return;try{if(!navigator.mediaDevices?.getUserMedia)return;audioCtx=new(window.AudioContext||window.webkitAudioContext)();if(audioCtx.state==='suspended')await audioCtx.resume();micStream=await openAudioInput(null);micAnalyser=createAnalyser();micFreqData=new Uint8Array(micAnalyser.frequencyBinCount);micTimeData=new Uint8Array(micAnalyser.fftSize);audioCtx.createMediaStreamSource(micStream).connect(micAnalyser);const outputId=deviceId||loopbackId;if(outputId){try{outStream=await openAudioInput(outputId);outAnalyser=createAnalyser();outFreqData=new Uint8Array(outAnalyser.frequencyBinCount);outTimeData=new Uint8Array(outAnalyser.fftSize);audioCtx.createMediaStreamSource(outStream).connect(outAnalyser);}catch(e){}}isListening=true;}catch(e){}}
+function stopAudio(){isListening=false;if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}if(outStream){outStream.getTracks().forEach(t=>t.stop());outStream=null;}if(audioCtx){audioCtx.close();audioCtx=null;}micAnalyser=null;outAnalyser=null;}
+function avgFreqFrom(analyser,freqData,minHz,maxHz){if(!analyser||!audioCtx||!freqData)return 0;const nyquist=audioCtx.sampleRate/2;const start=Math.max(0,Math.floor(minHz/nyquist*freqData.length));const end=Math.min(freqData.length-1,Math.ceil(maxHz/nyquist*freqData.length));let sum=0,count=0;for(let i=start;i<=end;i++){sum+=freqData[i];count++;}return count?Math.min(1,(sum/count)/180):0;}
+function metricsFrom(analyser,freqData,timeData){if(!analyser||!freqData||!timeData)return{level:0,bass:0,mid:0,treble:0};analyser.getByteTimeDomainData(timeData);analyser.getByteFrequencyData(freqData);let sum=0;for(let i=0;i<timeData.length;i++){const v=(timeData[i]-128)/128;sum+=v*v;}let rms=Math.sqrt(sum/timeData.length);let level=Math.max(0,(rms-NOISE_GATE)*AUDIO_SENSITIVITY);level=Math.min(1,Math.pow(level,0.72));const bass=avgFreqFrom(analyser,freqData,20,250);const mid=avgFreqFrom(analyser,freqData,250,2200);const treble=avgFreqFrom(analyser,freqData,2200,9000);if(level<NOISE_GATE)level=0;return{level,bass,mid,treble};}
+function getAudioMetrics(){if(!isListening)return{level:0,bass:0,mid:0,treble:0};const mic=metricsFrom(micAnalyser,micFreqData,micTimeData);const out=metricsFrom(outAnalyser,outFreqData,outTimeData);let level=Math.max(mic.level,out.level),bass=Math.max(mic.bass,out.bass),mid=Math.max(mic.mid,out.mid),treble=Math.max(mic.treble,out.treble);if(level<NOISE_GATE){level=0;bass=0;mid=0;treble=0;}return{level,bass,mid,treble};}
+function processAudio(){const m=getAudioMetrics();if(m.level<0.035){m.level=0;m.bass=0;m.mid=0;m.treble=0;}const atk=m.level>audioLevel?0.55:0.45;audioLevel=audioLevel*(1-atk)+m.level*atk;if(m.level<0.035)audioLevel*=0.08;audioBass=m.bass>audioBass?audioBass*0.55+m.bass*0.45:audioBass*0.38+m.bass*0.62;audioMid=m.mid>audioMid?audioMid*0.58+m.mid*0.42:audioMid*0.38+m.mid*0.62;audioTreble=m.treble>audioTreble?audioTreble*0.62+m.treble*0.38:audioTreble*0.35+m.treble*0.65;if(m.level<0.035){audioBass*=0.05;audioMid*=0.05;audioTreble*=0.05;}}
+
+// ═══════════════════════════════════════════════
+//  CANVAS + ÉTOILES
+// ═══════════════════════════════════════════════
+const cv=document.getElementById('c');
+const ctx=cv.getContext('2d');
+let W,H,CX,CY,R;
+
+// Étoiles fixes avec position angulaire
+const N_STARS=48;
+const stars=Array.from({length:N_STARS},(_,i)=>{
+  const a=Math.random()*Math.PI*2;
+  const r=(0.15+Math.random()*0.82);
+  return{a,baseR:r,r,phase:Math.random()*Math.PI*2,speed:0.2+Math.random()*0.8,size:0.5+Math.random()*2.5,hue:200+Math.random()*120};
+});
+// Étoiles filantes
+const shoots=[];
+function makeShoot(){
+  const a=Math.random()*Math.PI*2;
+  return{x:CX+Math.cos(a)*R*0.3,y:CY+Math.sin(a)*R*0.3,vx:(Math.random()-0.5)*12,vy:(Math.random()-0.5)*12,life:1,tail:[]};
+}
+
+function resize(){W=cv.width=window.innerWidth;H=cv.height=window.innerHeight;CX=W/2;CY=H/2;R=Math.min(W,H)*0.42;}
+window.addEventListener('resize',resize);
+
+let rotAngle=0;
+const t0=performance.now();
+function draw(){
+  requestAnimationFrame(draw);
+  processAudio();
+  interpolate();
+  const T=(performance.now()-t0)/1000;
+
+  ctx.clearRect(0,0,W,H);
+  rotAngle+=cur.rotSpeed*(1+audioBass*1.5)*0.01;
+
+  // Nébuleuse de fond
+  const nebR=R*(1.2+audioLevel*0.4);
+  const neb=ctx.createRadialGradient(CX,CY,0,CX,CY,nebR);
+  neb.addColorStop(0,`rgba(80,40,160,${cur.nebula*(0.4+audioLevel*0.5)})`);
+  neb.addColorStop(0.4,`rgba(40,20,100,${cur.nebula*(0.2+audioLevel*0.3)})`);
+  neb.addColorStop(0.7,`rgba(20,10,60,${cur.nebula*0.1})`);
+  neb.addColorStop(1,'transparent');
+  ctx.fillStyle=neb; ctx.fillRect(0,0,W,H);
+
+  // Connexions entre étoiles proches
+  const maxConn=R*(0.35+audioLevel*0.15+audioBass*0.1);
+  for(let i=0;i<stars.length;i++){
+    const si=stars[i];
+    const ax=rotAngle+si.a, rx=si.r*R;
+    const sx=CX+Math.cos(ax)*rx, sy=CY+Math.sin(ax)*rx;
+    for(let j=i+1;j<stars.length;j++){
+      const sj=stars[j];
+      const aj=rotAngle+sj.a, rj=sj.r*R;
+      const ex=CX+Math.cos(aj)*rj, ey=CY+Math.sin(aj)*rj;
+      const d=Math.hypot(sx-ex,sy-ey);
+      if(d>maxConn)continue;
+      const prox=1-d/maxConn;
+      const pulse=0.5+0.5*Math.sin(T*0.8+si.phase+sj.phase);
+      ctx.strokeStyle=`rgba(180,160,255,${(cur.connAlpha+audioMid*0.2)*prox*pulse})`;
+      ctx.lineWidth=0.5+prox*1.2*cur.starBright+audioTreble*0.6;
+      ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
+    }
+  }
+
+  // Étoiles
+  stars.forEach(s=>{
+    s.r=s.baseR+Math.sin(T*s.speed+s.phase)*0.03*(1+audioBass*1.5);
+    const a=rotAngle+s.a, r=s.r*R;
+    const x=CX+Math.cos(a)*r, y=CY+Math.sin(a)*r;
+    const pulse=0.5+0.5*Math.sin(T*s.speed*2+s.phase);
+    const sz=(s.size*cur.starSize*(0.7+pulse*0.5))*(1+audioLevel*0.6+audioTreble*0.4);
+    const bright=cur.starBright*(0.6+pulse*0.4)+audioLevel*0.3;
+    const g=ctx.createRadialGradient(x,y,0,x,y,sz*4);
+    g.addColorStop(0,`hsla(${s.hue},90%,95%,${bright})`);
+    g.addColorStop(0.3,`hsla(${s.hue},80%,70%,${bright*0.5})`);
+    g.addColorStop(1,'transparent');
+    ctx.fillStyle=g; ctx.fillRect(x-sz*4,y-sz*4,sz*8,sz*8);
+    ctx.fillStyle=`hsla(${s.hue},100%,98%,${bright})`;
+    ctx.beginPath(); ctx.arc(x,y,Math.max(0.5,sz*0.4),0,Math.PI*2); ctx.fill();
+  });
+
+  // Étoiles filantes
+  if(Math.random()<cur.shootRate*(1+audioBass*3))shoots.push(makeShoot());
+  for(let i=shoots.length-1;i>=0;i--){
+    const sh=shoots[i];
+    sh.tail.push({x:sh.x,y:sh.y});
+    if(sh.tail.length>18)sh.tail.shift();
+    sh.x+=sh.vx; sh.y+=sh.vy; sh.life-=0.04;
+    if(sh.life<=0){shoots.splice(i,1);continue;}
+    ctx.strokeStyle=`rgba(220,210,255,${sh.life*0.8})`;
+    ctx.lineWidth=1.5*sh.life;
+    ctx.beginPath();
+    sh.tail.forEach((p,ti)=>{if(ti===0)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y);});
+    ctx.lineTo(sh.x,sh.y); ctx.stroke();
+  }
+
+  // Centre lumineux
+  const cg=ctx.createRadialGradient(CX,CY,0,CX,CY,R*(0.12+audioLevel*0.1+audioBass*0.08));
+  cg.addColorStop(0,`rgba(240,230,255,${0.7+audioLevel*0.3})`);
+  cg.addColorStop(0.4,`rgba(180,140,255,${0.3+audioLevel*0.3})`);
+  cg.addColorStop(1,'transparent');
+  ctx.fillStyle=cg; ctx.fillRect(0,0,W,H);
+}
+
+// DRAG + FULLSCREEN
+let isDragging=false,dragX=0,dragY=0;
+cv.addEventListener('mousedown',e=>{if(e.button!==0)return;isDragging=true;dragX=e.screenX;dragY=e.screenY;});
+window.addEventListener('mousemove',e=>{if(!isDragging)return;if(window.avatarBridge?.moveWindow)window.avatarBridge.moveWindow(e.screenX-dragX,e.screenY-dragY);dragX=e.screenX;dragY=e.screenY;});
+window.addEventListener('mouseup',()=>isDragging=false);
+cv.addEventListener('dblclick',()=>{if(window.avatarBridge?.toggleFullscreen)window.avatarBridge.toggleFullscreen();});
+cv.addEventListener('contextmenu',e=>{e.preventDefault();if(window.avatarBridge?.toggleFullscreen)window.avatarBridge.toggleFullscreen();});
+window.addEventListener('blur',()=>{if(window.avatarBridge)window.avatarBridge.sendToBack();});
+
+function setState(s){tgt={...STATES[s]||STATES.idle};if(s==='listen')startAudio(null);else if(s==='speak')startAudio(loopbackId||null);else startAudio(null);}
+if(window.avatarBridge)window.avatarBridge.onState(setState);
+window.addEventListener('message',e=>{if(e.data?.orbState)setState(e.data.orbState);});
+document.addEventListener('keydown',e=>{if(e.key==='1')setState('idle');else if(e.key==='2')setState('listen');else if(e.key==='3')setState('speak');else if(e.key==='F11'){if(window.avatarBridge?.toggleFullscreen)window.avatarBridge.toggleFullscreen();}});
+window.addEventListener('load',()=>setTimeout(()=>setState('idle'),600));
+window.addEventListener('pointerdown',()=>{if(audioCtx?.state==='suspended')audioCtx.resume();});
+window.addEventListener('beforeunload',stopAudio);
+resize();
+draw();
+</script>
+</body>
+</html>

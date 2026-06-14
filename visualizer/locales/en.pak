@@ -1,0 +1,19 @@
+{
+    "plugin": {
+        "from": "from"
+    },
+    "visualizer": {
+        "opened":      "Visualizer opened.",
+        "closed":      "Visualizer closed.",
+        "orbChanged1": "Orb style one activated.",
+        "orbChanged2": "Orb style two activated.",
+        "orbChanged3": "Orb style three activated.",
+        "orbChanged4": "Matrix style activated.",
+        "orbChanged5": "Circular oscilloscope style.",
+        "orbChanged6": "Plasma fire style.",
+        "orbChanged7": "Constellation style.",
+        "orbChanged8": "Vortex tunnel style.",
+        "orbChanged9": "Circular equalizer style.",
+        "orbChanged10":"Water ripple style."
+    }
+}

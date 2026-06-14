@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<title>A.V.A.T.A.R Orb</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: transparent;
+    overflow: hidden;
+    width: 100vw; height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-app-region: no-drag;
+  }
+  canvas { display: block; -webkit-app-region: no-drag; }
+
+  #close-btn {
+    position: absolute; top: 10px; right: 14px;
+    color: rgba(100,200,255,0.3);
+    font-size: 14px; cursor: pointer;
+    -webkit-app-region: no-drag;
+    transition: color 0.2s;
+  }
+  #close-btn:hover { color: rgba(150,230,255,0.9); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="close-btn" onclick="window.close()">✕</div>
+
+<script>
+// ═══════════════════════════════════════════════════
+//  ÉTATS
+// ═══════════════════════════════════════════════════
+const STATES = {
+  idle: {
+    coreColor:   [0.05, 0.35, 0.90],
+    glowColor:   [0.00, 0.15, 0.55],
+    ringColor:   [0.10, 0.60, 1.00],
+    pulseSpeed:  0.5,
+    pulseAmp:    0.025,
+    noiseSpeed:  0.12,
+    noiseAmp:    0.035,
+    radius:      0.18,
+    ringSpeed:   [0.3, -0.2, 0.15],
+    ringAlpha:   0.45,
+    label:       'idle'
+  },
+  listen: {
+    coreColor:   [0.00, 0.75, 1.00],
+    glowColor:   [0.00, 0.35, 0.75],
+    ringColor:   [0.00, 0.90, 1.00],
+    pulseSpeed:  2.5,
+    pulseAmp:    0.16,
+    noiseSpeed:  1.2,
+    noiseAmp:    0.18,
+    radius:      0.20,
+    ringSpeed:   [1.2, -0.8, 0.6],
+    ringAlpha:   0.75,
+    label:       'écoute'
+  },
+  speak: {
+    coreColor:   [0.40, 0.88, 1.00],
+    glowColor:   [0.05, 0.50, 0.95],
+    ringColor:   [0.60, 0.95, 1.00],
+    pulseSpeed:  4.0,
+    pulseAmp:    0.22,
+    noiseSpeed:  2.0,
+    noiseAmp:    0.26,
+    radius:      0.22,
+    ringSpeed:   [2.2, -1.6, 1.1],
+    ringAlpha:   0.95,
+    label:       'parole'
+  }
+};
+
+// ═══════════════════════════════════════════════════
+//  INTERPOLATION
+// ═══════════════════════════════════════════════════
+let cur = JSON.parse(JSON.stringify(STATES.idle));
+let tgt = JSON.parse(JSON.stringify(STATES.idle));
+const T      = 0.015;
+const T_SLOW = 0.008;
+
+function lerp(a,b,t){return a+(b-a)*t;}
+function lerpArr(a,b,t){return a.map((v,i)=>lerp(v,b[i],t));}
+
+function interpolate() {
+  const tExit = window._exitSpeakOverride || null;
+  const tAmp  = tExit || T_SLOW;
+  const tBase = tExit || T;
+
+  ['pulseAmp','noiseAmp','noiseSpeed'].forEach(k => {
+    cur[k] = lerp(cur[k], tgt[k], tAmp);
+  });
+  ['pulseSpeed','radius','ringAlpha'].forEach(k => {
+    cur[k] = lerp(cur[k], tgt[k], tBase);
+  });
+  ['coreColor','glowColor','ringColor','ringSpeed'].forEach(k => {
+    cur[k] = lerpArr(cur[k], tgt[k], tBase);
+  });
+}
+
+// ═══════════════════════════════════════════════════
+//  WEBGL
+// ═══════════════════════════════════════════════════
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+resize();
+
+const VS = `
+attribute vec2 a_pos;
+void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }
+`;
+
+const FS = `
+precision highp float;
+
+uniform vec2  u_res;
+uniform float u_time;
+uniform vec3  u_coreColor;
+uniform vec3  u_glowColor;
+uniform vec3  u_ringColor;
+uniform float u_pulseSpeed;
+uniform float u_pulseAmp;
+uniform float u_noiseSpeed;
+uniform float u_noiseAmp;
+uniform float u_radius;
+uniform float u_ringAlpha;
+uniform vec3  u_ringSpeed;
+uniform float u_ringAspect;
+uniform float u_audioLevel;
+uniform float u_audioBass;
+uniform float u_audioMid;
+uniform float u_audioTreble;
+
+vec2 hash2(vec2 p) {
+  p = vec2(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)));
+  return -1.0 + 2.0*fract(sin(p)*43758.5453123);
+}
+float noise(vec2 p) {
+  vec2 i=floor(p), f=fract(p);
+  vec2 u=f*f*(3.0-2.0*f);
+  return mix(mix(dot(hash2(i),f), dot(hash2(i+vec2(1,0)),f-vec2(1,0)),u.x),
+             mix(dot(hash2(i+vec2(0,1)),f-vec2(0,1)), dot(hash2(i+vec2(1,1)),f-vec2(1,1)),u.x),u.y);
+}
+float fbm(vec2 p) {
+  float v=0.0,a=0.5;
+  for(int i=0;i<5;i++){v+=a*noise(p);p=p*2.0+vec2(1.7,9.2);a*=0.5;}
+  return v;
+}
+
+float ring(vec2 uv, float tiltX, float tiltY, float rot, float radius, float thickness) {
+  float cr=cos(rot), sr=sin(rot);
+  vec2 r=vec2(cr*uv.x-sr*uv.y, sr*uv.x+cr*uv.y);
+  float px = r.x;
+  float py = r.y * cos(tiltX) + 0.0;
+  float pz = r.y * sin(tiltX);
+  float d = abs(length(vec2(px, py)) - radius);
+  float depthFade = clamp(0.5 + 0.5 * sin(tiltY + rot), 0.15, 1.0);
+  return smoothstep(thickness, 0.0, d) * depthFade;
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - u_res*0.5) / min(u_res.x, u_res.y);
+
+  float t = u_time * u_noiseSpeed;
+  vec2 disp = vec2(
+    fbm(uv*3.0 + vec2(t*0.7, t*0.3)),
+    fbm(uv*3.0 + vec2(t*0.3, t*0.7) + 5.2)
+  );
+  vec2 distUV = uv + disp * (u_noiseAmp + u_audioMid * 0.11 + u_audioLevel * 0.07);
+  float dist   = length(distUV);
+  float pulse  = 1.0 + sin(u_time*u_pulseSpeed)*u_pulseAmp + u_audioLevel * 0.28 + u_audioBass * 0.22;
+  float r      = u_radius * pulse;
+
+  float core   = smoothstep(r*0.55, r*0.0,  dist);
+  float mid    = smoothstep(r*1.05, r*0.25, dist) * (1.0 - core);
+  float glow   = pow(max(0.0, 1.0 - dist/(r*(3.2 + u_audioLevel*0.9))), 2.2);
+
+  float t1 = u_time * u_ringSpeed.x;
+  float t2 = u_time * u_ringSpeed.y;
+  float t3 = u_time * u_ringSpeed.z;
+
+  float rr = r * 2.0;
+  float rthick = 0.006 + u_audioLevel * 0.018 + u_audioTreble * 0.008;
+
+  float rings = 0.0;
+  float sphereMask = 1.0 - smoothstep(r*0.9, r*1.1, dist);
+  rings *= (1.0 - sphereMask * 0.85);
+
+  vec3 col = vec3(0.0);
+  col += glow  * u_glowColor * (0.8 + u_audioLevel * 0.7);
+  col += mid   * u_coreColor;
+  col += core  * vec3(0.7, 0.93, 1.0);
+
+  float sparkle = pow(max(0.0, fbm(uv*9.0 + t*1.5)), 3.0);
+  col += sparkle * core * vec3(1.0) * (0.5 + u_audioTreble * 1.2);
+
+  float alpha = clamp(glow*1.6 + mid + core + rings*u_ringAlpha*0.8, 0.0, 1.0);
+  gl_FragColor = vec4(col, alpha);
+}
+`;
+
+function mkShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, mkShader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, mkShader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'a_pos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const U = name => gl.getUniformLocation(prog, name);
+const uRes        = U('u_res');
+const uTime       = U('u_time');
+const uCoreColor  = U('u_coreColor');
+const uGlowColor  = U('u_glowColor');
+const uRingColor  = U('u_ringColor');
+const uPulseSpeed = U('u_pulseSpeed');
+const uPulseAmp   = U('u_pulseAmp');
+const uNoiseSpeed = U('u_noiseSpeed');
+const uNoiseAmp   = U('u_noiseAmp');
+const uRadius     = U('u_radius');
+const uRingAlpha  = U('u_ringAlpha');
+const uRingSpeed  = U('u_ringSpeed');
+const uRingAspect = U('u_ringAspect');
+const uAudioLevel = U('u_audioLevel');
+const uAudioBass  = U('u_audioBass');
+const uAudioMid   = U('u_audioMid');
+const uAudioTreble= U('u_audioTreble');
+
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+
+// ═══════════════════════════════════════════════════
+//  AUDIO : sortie Windows + entrée micro en parallèle
+// ═══════════════════════════════════════════════════
+const AUDIO_SENSITIVITY = 2.4;
+const NOISE_GATE        = 0.035;
+
+let audioCtx = null;
+
+// Sortie audio Windows via loopback / Stereo Mix / VB-CABLE / VoiceMeeter
+let outAnalyser = null;
+let outFreqData = null;
+let outTimeData = null;
+let outStream   = null;
+
+// Entrée micro réelle
+let micAnalyser = null;
+let micFreqData = null;
+let micTimeData = null;
+let micStream   = null;
+
+let isListening = false;
+let loopbackId  = null;
+
+// Détecte Stereo Mix / What U Hear / VB-CABLE / VoiceMeeter / loopback Windows
+async function detectLoopback() {
+  try {
+    const tmpStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    tmpStream.getTracks().forEach(t => t.stop());
+
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const lb = devs.find(d => d.kind === 'audioinput' && (
+      d.label.toLowerCase().includes('stereo mix') ||
+      d.label.toLowerCase().includes('mélange stéréo') ||
+      d.label.toLowerCase().includes('melange stereo') ||
+      d.label.toLowerCase().includes('what u hear') ||
+      d.label.toLowerCase().includes('wave out mix') ||
+      d.label.toLowerCase().includes('loopback') ||
+      d.label.toLowerCase().includes('cable output') ||
+      d.label.toLowerCase().includes('vb-audio') ||
+      d.label.toLowerCase().includes('voicemeeter output') ||
+      d.label.toLowerCase().includes('voicemeeter aux output') ||
+      d.label.toLowerCase().includes('voicemeeter vaio')
+    ));
+
+    if (lb) { loopbackId = lb.deviceId; console.log('Loopback détecté:', lb.label); }
+    else    { console.log('Aucun loopback détecté — micro uniquement'); }
+  } catch(e) { console.warn('detectLoopback:', e); }
+}
+detectLoopback();
+
+function createAnalyser() {
+  const a = audioCtx.createAnalyser();
+  a.fftSize = 1024;
+  a.minDecibels = -90;
+  a.maxDecibels = -10;
+  a.smoothingTimeConstant = 0.35;
+  return a;
+}
+
+async function openAudioInput(deviceId) {
+  const constraints = deviceId
+    ? { audio: { deviceId: { exact: deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false }
+    : { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false };
+
+  try {
+    return await navigator.mediaDevices.getUserMedia(constraints);
+  } catch(e) {
+    return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  }
+}
+
+async function startAudio(deviceId) {
+  if (isListening) return;
+
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.warn('visualizer: getUserMedia indisponible');
+      return;
+    }
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    // 1) Micro toujours actif
+    micStream = await openAudioInput(null);
+    micAnalyser = createAnalyser();
+    micFreqData = new Uint8Array(micAnalyser.frequencyBinCount);
+    micTimeData = new Uint8Array(micAnalyser.fftSize);
+    audioCtx.createMediaStreamSource(micStream).connect(micAnalyser);
+    console.log('Micro surveillé');
+
+    // 2) Sortie audio si périphérique disponible
+    const outputId = deviceId || loopbackId;
+    if (outputId) {
+      try {
+        outStream = await openAudioInput(outputId);
+        outAnalyser = createAnalyser();
+        outFreqData = new Uint8Array(outAnalyser.frequencyBinCount);
+        outTimeData = new Uint8Array(outAnalyser.fftSize);
+        audioCtx.createMediaStreamSource(outStream).connect(outAnalyser);
+        console.log('Sortie audio surveillée');
+      } catch(e) {
+        console.warn('Sortie audio non disponible, micro seul:', e);
+      }
+    }
+
+    isListening = true;
+  } catch(e) {
+    console.warn('visualizer: audio non disponible', e);
+  }
+}
+
+function stopAudio() {
+  isListening = false;
+
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (outStream) { outStream.getTracks().forEach(t => t.stop()); outStream = null; }
+
+  if (audioCtx) {
+    audioCtx.close();
+    audioCtx = null;
+  }
+
+  micAnalyser = null;
+  outAnalyser = null;
+}
+
+function avgFreqFrom(analyser, freqData, minHz, maxHz) {
+  if (!analyser || !audioCtx || !freqData) return 0;
+  const nyquist = audioCtx.sampleRate / 2;
+  const start = Math.max(0, Math.floor(minHz / nyquist * freqData.length));
+  const end   = Math.min(freqData.length - 1, Math.ceil(maxHz / nyquist * freqData.length));
+  let sum = 0, count = 0;
+  for (let i = start; i <= end; i++) { sum += freqData[i]; count++; }
+  return count ? Math.min(1, (sum / count) / 180) : 0;
+}
+
+function metricsFrom(analyser, freqData, timeData) {
+  if (!analyser || !freqData || !timeData) {
+    return { level: 0, bass: 0, mid: 0, treble: 0 };
+  }
+
+  analyser.getByteTimeDomainData(timeData);
+  analyser.getByteFrequencyData(freqData);
+
+  let sum = 0;
+  for (let i = 0; i < timeData.length; i++) {
+    const v = (timeData[i] - 128) / 128;
+    sum += v * v;
+  }
+
+  let rms = Math.sqrt(sum / timeData.length);
+  let level = Math.max(0, (rms - NOISE_GATE) * AUDIO_SENSITIVITY);
+  level = Math.min(1, Math.pow(level, 0.72));
+
+  const bass   = avgFreqFrom(analyser, freqData, 20,   250);
+  const mid    = avgFreqFrom(analyser, freqData, 250,  2200);
+  const treble = avgFreqFrom(analyser, freqData, 2200, 9000);
+
+  if (level < NOISE_GATE) {
+    level = 0;
+  }
+
+  return { level, bass, mid, treble };
+}
+
+function getAudioMetrics() {
+  if (!isListening) return { level: 0, bass: 0, mid: 0, treble: 0 };
+
+  const mic = metricsFrom(micAnalyser, micFreqData, micTimeData);
+  const out = metricsFrom(outAnalyser, outFreqData, outTimeData);
+
+  let level  = Math.max(mic.level,  out.level);
+  let bass   = Math.max(mic.bass,   out.bass);
+  let mid    = Math.max(mic.mid,    out.mid);
+  let treble = Math.max(mic.treble, out.treble);
+
+  if (level < NOISE_GATE) {
+    level = 0;
+    bass = 0;
+    mid = 0;
+    treble = 0;
+  }
+
+  return { level, bass, mid, treble };
+}
+
+// ═══════════════════════════════════════════════════
+//  DRAG FENÊTRE
+// ═══════════════════════════════════════════════════
+let isDragging = false;
+let dragStartX = 0, dragStartY = 0;
+
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  isDragging = true;
+  dragStartX = e.screenX;
+  dragStartY = e.screenY;
+  e.preventDefault();
+});
+window.addEventListener('mousemove', e => {
+  if (!isDragging) return;
+  const dx = e.screenX - dragStartX;
+  const dy = e.screenY - dragStartY;
+  dragStartX = e.screenX;
+  dragStartY = e.screenY;
+  if (window.avatarBridge && window.avatarBridge.moveWindow)
+    window.avatarBridge.moveWindow(dx, dy);
+});
+window.addEventListener('mouseup', () => { isDragging = false; });
+
+// Double-clic : bascule plein écran
+canvas.addEventListener('dblclick', () => {
+  if (window.avatarBridge?.toggleFullscreen) window.avatarBridge.toggleFullscreen();
+});
+// Clic droit : idem
+canvas.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (window.avatarBridge?.toggleFullscreen) window.avatarBridge.toggleFullscreen();
+});
+
+window.addEventListener('blur', () => {
+  if (window.avatarBridge && window.avatarBridge.sendToBack)
+    window.avatarBridge.sendToBack();
+});
+
+// ═══════════════════════════════════════════════════
+//  BOUCLE DE RENDU
+// ═══════════════════════════════════════════════════
+let audioLevel  = 0;
+let audioBass   = 0;
+let audioMid    = 0;
+let audioTreble = 0;
+
+const t0 = performance.now();
+
+function render() {
+  requestAnimationFrame(render);
+  interpolate();
+
+  const m = getAudioMetrics();
+
+  // Anti-vacillement : si silence/bruit de fond très faible, on force le niveau à zéro
+  if (m.level < 0.035) {
+    m.level = 0;
+    m.bass = 0;
+    m.mid = 0;
+    m.treble = 0;
+  }
+
+  // Attaque rapide, retour rapide à zéro
+  const atk = m.level > audioLevel ? 0.55 : 0.45;
+  audioLevel = audioLevel * (1 - atk) + m.level * atk;
+  if (m.level < 0.035) audioLevel *= 0.08;
+
+  audioBass   = m.bass   > audioBass   ? audioBass   * 0.55 + m.bass   * 0.45 : audioBass   * 0.38 + m.bass   * 0.62;
+  audioMid    = m.mid    > audioMid    ? audioMid    * 0.58 + m.mid    * 0.42 : audioMid    * 0.38 + m.mid    * 0.62;
+  audioTreble = m.treble > audioTreble ? audioTreble * 0.62 + m.treble * 0.38 : audioTreble * 0.35 + m.treble * 0.65;
+
+  if (m.level < 0.035) {
+    audioBass   *= 0.05;
+    audioMid    *= 0.05;
+    audioTreble *= 0.05;
+  }
+
+  const t = (performance.now() - t0) / 1000;
+
+  gl.clearColor(0,0,0,0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  gl.uniform2f(uRes,        canvas.width, canvas.height);
+  gl.uniform1f(uTime,       t);
+  gl.uniform3fv(uCoreColor, cur.coreColor);
+  gl.uniform3fv(uGlowColor, cur.glowColor);
+  gl.uniform3fv(uRingColor, cur.ringColor);
+  gl.uniform1f(uPulseSpeed, cur.pulseSpeed);
+  gl.uniform1f(uPulseAmp,   cur.pulseAmp);
+  gl.uniform1f(uNoiseSpeed, cur.noiseSpeed);
+  gl.uniform1f(uNoiseAmp,   cur.noiseAmp);
+  gl.uniform1f(uRadius,     cur.radius);
+  gl.uniform1f(uRingAlpha,  cur.ringAlpha);
+  gl.uniform3fv(uRingSpeed, cur.ringSpeed);
+  gl.uniform1f(uRingAspect, canvas.width / canvas.height);
+  gl.uniform1f(uAudioLevel,  audioLevel);
+  gl.uniform1f(uAudioBass,   audioBass);
+  gl.uniform1f(uAudioMid,    audioMid);
+  gl.uniform1f(uAudioTreble, audioTreble);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+render();
+
+// ═══════════════════════════════════════════════════
+//  CHANGEMENT D'ÉTAT
+// ═══════════════════════════════════════════════════
+let currentState = 'idle';
+let stopAudioTimer = null;
+
+function setState(state) {
+  const prev = currentState;
+  currentState = state;
+  const cfg = STATES[state] || STATES.idle;
+
+  if (prev === 'speak' && state === 'idle') {
+    audioLevel = 0; audioBass = 0; audioMid = 0; audioTreble = 0;
+  }
+
+  tgt = JSON.parse(JSON.stringify(cfg));
+
+  if (stopAudioTimer) { clearTimeout(stopAudioTimer); stopAudioTimer = null; }
+
+  if (state === 'listen') {
+    // Micro : entrée par défaut (microphone)
+    startAudio(null);
+  } else if (state === 'speak') {
+    // Sortie Windows : loopback (Stereo Mix / What U Hear)
+    // Si aucun loopback disponible, fallback sur micro pour rester réactif
+    startAudio(loopbackId || null);
+  } else {
+    // idle : on garde le micro actif (pulsation ambiante)
+    startAudio(null);
+  }
+}
+
+if (window.avatarBridge) {
+  window.avatarBridge.onState(setState);
+}
+
+window.addEventListener('message', e => {
+  if (e.data && e.data.orbState) setState(e.data.orbState);
+});
+
+document.addEventListener('click', () => setState('speak'), { once: true });
+
+window.addEventListener('load', () => {
+  setTimeout(() => setState('speak'), 600);
+});
+window.addEventListener('pointerdown', () => {
+  setState('speak');
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+});
+
+document.addEventListener('keydown', e => {
+  if      (e.key === '1') setState('idle');
+  else if (e.key === '2') setState('listen');
+  else if (e.key === '3') setState('speak');
+  else if (e.key === 'F11') {
+    if (window.avatarBridge?.toggleFullscreen) window.avatarBridge.toggleFullscreen();
+  }
+});
+window.addEventListener('beforeunload', stopAudio);
+</script>
+</body>
+</html>

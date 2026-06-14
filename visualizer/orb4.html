@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<title>A.V.A.T.A.R Orb — Matrix</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: transparent;
+    overflow: hidden;
+    width: 100vw; height: 100vh;
+    -webkit-app-region: no-drag;
+  }
+  canvas { display:block; -webkit-app-region:no-drag; }
+  #close-btn {
+    position:absolute; top:10px; right:14px;
+    color:rgba(0,255,70,0.25);
+    font-size:14px; cursor:pointer;
+    -webkit-app-region:no-drag;
+    transition:color 0.2s;
+    font-family:monospace;
+  }
+  #close-btn:hover { color:rgba(0,255,70,0.9); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="close-btn" onclick="window.close()">✕</div>
+
+<script>
+// ═══════════════════════════════════════════════
+//  ÉTATS
+// ═══════════════════════════════════════════════
+const STATES = {
+  idle: {
+    speedBase:    1.2,    // vitesse de chute des colonnes
+    density:      0.025,  // probabilité de spawn nouvelle colonne
+    glowIntensity:0.18,   // luminosité des têtes
+    trailLength:  0.82,   // longueur des traînées (alpha fade)
+    colorH:       120,    // teinte (120 = vert Matrix)
+    colorS:       100,
+    label: 'idle'
+  },
+  listen: {
+    speedBase:    1.2,
+    density:      0.05,
+    glowIntensity:0.45,
+    trailLength:  0.75,
+    colorH:       140,
+    colorS:       100,
+    label: 'écoute'
+  },
+  speak: {
+    speedBase:    2.2,
+    density:      0.10,
+    glowIntensity:0.85,
+    trailLength:  0.65,
+    colorH:       100,
+    colorS:       100,
+    label: 'parole'
+  }
+};
+
+let STATE = 'idle';
+let audioLevel = 0, audioBass = 0, audioMid = 0, audioTreble = 0;
+
+// Interpolation douce des paramètres
+let curSpeed    = 1.2,  tgtSpeed    = 1.2;
+let curDensity  = 0.025,tgtDensity  = 0.025;
+let curGlow     = 0.18, tgtGlow     = 0.18;
+let curTrail    = 0.82, tgtTrail    = 0.82;
+let curColorH   = 120,  tgtColorH   = 120;
+let curFontScale= 1.0;  // facteur d'échelle police centre (modulé par audio)
+
+// ═══════════════════════════════════════════════════
+//  AUDIO : sortie Windows + entrée micro en parallèle
+// ═══════════════════════════════════════════════════
+const AUDIO_SENSITIVITY = 2.4;
+const NOISE_GATE        = 0.035;
+
+let audioCtx    = null;
+let outAnalyser = null, outFreqData = null, outTimeData = null, outStream = null;
+let micAnalyser = null, micFreqData = null, micTimeData = null, micStream = null;
+let isListening = false;
+let loopbackId  = null;
+
+async function detectLoopback() {
+  try {
+    const tmp = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
+    tmp.getTracks().forEach(t => t.stop());
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const lb = devs.find(d => d.kind === 'audioinput' && (
+      d.label.toLowerCase().includes('stereo mix') ||
+      d.label.toLowerCase().includes('mélange stéréo') ||
+      d.label.toLowerCase().includes('melange stereo') ||
+      d.label.toLowerCase().includes('what u hear') ||
+      d.label.toLowerCase().includes('wave out mix') ||
+      d.label.toLowerCase().includes('loopback') ||
+      d.label.toLowerCase().includes('cable output') ||
+      d.label.toLowerCase().includes('vb-audio') ||
+      d.label.toLowerCase().includes('voicemeeter output') ||
+      d.label.toLowerCase().includes('voicemeeter aux output') ||
+      d.label.toLowerCase().includes('voicemeeter vaio')
+    ));
+    if (lb) { loopbackId = lb.deviceId; console.log('Loopback détecté:', lb.label); }
+    else     { console.log('Aucun loopback — micro seul'); }
+  } catch(e) { console.warn('detectLoopback:', e); }
+}
+detectLoopback();
+
+function createAnalyser() {
+  const a = audioCtx.createAnalyser();
+  a.fftSize = 1024;
+  a.minDecibels = -90;
+  a.maxDecibels = -10;
+  a.smoothingTimeConstant = 0.35;
+  return a;
+}
+
+async function openAudioInput(deviceId) {
+  const c = deviceId
+    ? { audio:{ deviceId:{exact:deviceId}, echoCancellation:false, noiseSuppression:false, autoGainControl:false }, video:false }
+    : { audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false }, video:false };
+  try { return await navigator.mediaDevices.getUserMedia(c); }
+  catch(e) { return await navigator.mediaDevices.getUserMedia({ audio:true, video:false }); }
+}
+
+async function startAudio(deviceId) {
+  if (isListening) return;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) { console.warn('getUserMedia indisponible'); return; }
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    micStream   = await openAudioInput(null);
+    micAnalyser = createAnalyser();
+    micFreqData = new Uint8Array(micAnalyser.frequencyBinCount);
+    micTimeData = new Uint8Array(micAnalyser.fftSize);
+    audioCtx.createMediaStreamSource(micStream).connect(micAnalyser);
+
+    const outputId = deviceId || loopbackId;
+    if (outputId) {
+      try {
+        outStream   = await openAudioInput(outputId);
+        outAnalyser = createAnalyser();
+        outFreqData = new Uint8Array(outAnalyser.frequencyBinCount);
+        outTimeData = new Uint8Array(outAnalyser.fftSize);
+        audioCtx.createMediaStreamSource(outStream).connect(outAnalyser);
+      } catch(e) { console.warn('Sortie audio non disponible:', e); }
+    }
+    isListening = true;
+  } catch(e) { console.warn('Audio non disponible:', e); }
+}
+
+function stopAudio() {
+  isListening = false;
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (outStream) { outStream.getTracks().forEach(t => t.stop()); outStream = null; }
+  if (audioCtx)  { audioCtx.close(); audioCtx = null; }
+  micAnalyser = null; outAnalyser = null;
+}
+
+function avgFreqFrom(analyser, freqData, minHz, maxHz) {
+  if (!analyser || !audioCtx || !freqData) return 0;
+  const nyquist = audioCtx.sampleRate / 2;
+  const start = Math.max(0, Math.floor(minHz / nyquist * freqData.length));
+  const end   = Math.min(freqData.length - 1, Math.ceil(maxHz / nyquist * freqData.length));
+  let sum = 0, count = 0;
+  for (let i = start; i <= end; i++) { sum += freqData[i]; count++; }
+  return count ? Math.min(1, (sum / count) / 180) : 0;
+}
+
+function metricsFrom(analyser, freqData, timeData) {
+  if (!analyser || !freqData || !timeData) return { level:0, bass:0, mid:0, treble:0 };
+  analyser.getByteTimeDomainData(timeData);
+  analyser.getByteFrequencyData(freqData);
+  let sum = 0;
+  for (let i = 0; i < timeData.length; i++) { const v = (timeData[i]-128)/128; sum += v*v; }
+  let rms = Math.sqrt(sum / timeData.length);
+  let level = Math.max(0, (rms - NOISE_GATE) * AUDIO_SENSITIVITY);
+  level = Math.min(1, Math.pow(level, 0.72));
+  const bass   = avgFreqFrom(analyser, freqData, 20,   250);
+  const mid    = avgFreqFrom(analyser, freqData, 250,  2200);
+  const treble = avgFreqFrom(analyser, freqData, 2200, 9000);
+  if (level < NOISE_GATE) level = 0;
+  return { level, bass, mid, treble };
+}
+
+function getAudioMetrics() {
+  if (!isListening) return { level:0, bass:0, mid:0, treble:0 };
+  const mic = metricsFrom(micAnalyser, micFreqData, micTimeData);
+  const out = metricsFrom(outAnalyser, outFreqData, outTimeData);
+  let level  = Math.max(mic.level,  out.level);
+  let bass   = Math.max(mic.bass,   out.bass);
+  let mid    = Math.max(mic.mid,    out.mid);
+  let treble = Math.max(mic.treble, out.treble);
+  if (level < NOISE_GATE) { level = 0; bass = 0; mid = 0; treble = 0; }
+  return { level, bass, mid, treble };
+}
+
+function processAudio() {
+  const m = getAudioMetrics();
+  const atk = m.level > audioLevel ? 0.55 : 0.45;
+  audioLevel = audioLevel * (1-atk) + m.level * atk;
+  if (m.level < 0.035) audioLevel *= 0.08;
+  audioBass   = m.bass   > audioBass   ? audioBass*0.55+m.bass*0.45   : audioBass*0.38+m.bass*0.62;
+  audioMid    = m.mid    > audioMid    ? audioMid*0.58+m.mid*0.42     : audioMid*0.38+m.mid*0.62;
+  audioTreble = m.treble > audioTreble ? audioTreble*0.62+m.treble*0.38 : audioTreble*0.35+m.treble*0.65;
+  if (m.level < 0.035) { audioBass *= 0.05; audioMid *= 0.05; audioTreble *= 0.05; }
+}
+
+// ═══════════════════════════════════════════════
+//  CANVAS + COLONNES MATRIX
+// ═══════════════════════════════════════════════
+const cv  = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H, cols, FONT_SIZE;
+
+// Caractères Matrix : katakana + chiffres + latin
+const CHARS = 'ｦｧｨｩｪｫｬｭｮｯｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ@#$%&*';
+
+// Chaque colonne : position y, vitesse, caractères, longueur traînée, phase
+let columns = [];
+
+function initColumns() {
+  FONT_SIZE = Math.max(10, Math.floor(Math.min(W, H) / 48));
+  cols = Math.floor(W / FONT_SIZE);
+  columns = [];
+  for (let i = 0; i < cols; i++) {
+    columns.push(makeColumn(i, true));
+  }
+}
+
+function makeColumn(colIdx, randomY = false) {
+  const trailLen = 8 + Math.floor(Math.random() * 24);
+  return {
+    x:       colIdx * FONT_SIZE,
+    y:       randomY ? Math.random() * -H : -trailLen * FONT_SIZE,
+    speed:   0.5 + Math.random() * 1.5,
+    chars:   Array.from({length: trailLen}, () => randChar()),
+    trailLen,
+    mutTimer: 0,        // timer mutation caractères
+    active:  true
+  };
+}
+
+function randChar() {
+  return CHARS[Math.floor(Math.random() * CHARS.length)];
+}
+
+function resize() {
+  W = cv.width  = window.innerWidth;
+  H = cv.height = window.innerHeight;
+  initColumns();
+}
+window.addEventListener('resize', resize);
+
+// ═══════════════════════════════════════════════
+//  BOUCLE DE RENDU
+// ═══════════════════════════════════════════════
+let lastTime = 0;
+
+function draw(ts) {
+  requestAnimationFrame(draw);
+  const dt = Math.min((ts - lastTime) / 1000, 0.05);
+  lastTime = ts;
+
+  processAudio();
+
+  // Interpolation paramètres état → cible
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const sp = 0.04;
+  curSpeed   = lerp(curSpeed,   tgtSpeed,   sp);
+  curDensity = lerp(curDensity, tgtDensity, sp);
+  curGlow    = lerp(curGlow,    tgtGlow,    sp);
+  curTrail   = lerp(curTrail,   tgtTrail,   sp);
+  curColorH  = lerp(curColorH,  tgtColorH,  sp);
+  // Taille police centre : monte vite sur le son, redescend doucement
+  const tgtFontScale = 1.0 + audioLevel * 2.2 + audioBass * 1.8;
+  curFontScale = curFontScale + (tgtFontScale - curFontScale) * (tgtFontScale > curFontScale ? 0.25 : 0.06);
+
+  // Modulateurs audio
+  const speedMod   = 1 + audioBass   * 2.5 + audioLevel * 1.5;  // basse → vitesse
+  const densityMod = 1 + audioMid    * 3.0;                      // mid   → densité
+  const glowMod    = 1 + audioLevel  * 1.8 + audioTreble * 1.2; // level → éclat
+  const trailMod   =     audioLevel  * 0.18;                     // level → traînée plus courte
+
+  const effectiveSpeed   = curSpeed   * speedMod;
+  const effectiveDensity = curDensity * densityMod;
+  const effectiveGlow    = Math.min(1, curGlow * glowMod);
+  const effectiveTrail   = Math.max(0.30, curTrail - trailMod);
+
+  // Fondu traînée — semi-transparent noir
+  ctx.fillStyle = `rgba(0,0,0,${1 - effectiveTrail})`;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textBaseline = 'top';
+
+  columns.forEach((col, ci) => {
+    if (!col.active) return;
+
+    // Taille police : plus grande au centre selon audio
+    const distFromCenter = Math.abs(col.x - W/2) / (W/2); // 0=centre 1=bord
+    const colFontSize = Math.round(FONT_SIZE * (1 + (1 - distFromCenter) * (curFontScale - 1)));
+    const colFontSize2 = Math.max(FONT_SIZE, Math.min(FONT_SIZE * 4, colFontSize));
+
+    // Mutation aléatoire des caractères
+    col.mutTimer += dt;
+    if (col.mutTimer > 0.05 + Math.random() * 0.08) {
+      col.mutTimer = 0;
+      const idx = Math.floor(Math.random() * col.chars.length);
+      col.chars[idx] = randChar();
+    }
+
+    // Avancer la colonne
+    col.y += effectiveSpeed * col.speed * dt * 60;
+
+    // Police variable pour cette colonne
+    ctx.font = `${colFontSize2}px monospace`;
+
+    // Dessiner la traînée
+    for (let j = col.chars.length - 1; j >= 0; j--) {
+      const cy = col.y - j * colFontSize2;
+      if (cy < -colFontSize2 || cy > H) continue;
+
+      const norm = j / col.chars.length; // 0 = tête, 1 = queue
+
+      let alpha, r, g, b;
+
+      if (j === 0) {
+        // Tête : blanc brillant modulé par glow
+        const headGlow = effectiveGlow;
+        r = Math.floor(lerp(180, 255, headGlow));
+        g = 255;
+        b = Math.floor(lerp(180, 255, headGlow * 0.5));
+        alpha = 0.85 + headGlow * 0.15;
+      } else {
+        // Corps : vert Matrix → fade vers noir selon position
+        const fade = Math.pow(1 - norm, 1.4);
+        // Teinte modulée par état
+        const hue = curColorH;
+        // Convertir HSL simple → RGB
+        const l = 0.12 + fade * 0.45;
+        const s = 1.0;
+        const c2 = (1 - Math.abs(2 * l - 1)) * s;
+        const x2 = c2 * (1 - Math.abs(((hue / 60) % 2) - 1));
+        const m2 = l - c2 / 2;
+        let rr=0, gg=0, bb=0;
+        if      (hue <  60) { rr=c2; gg=x2; bb=0; }
+        else if (hue < 120) { rr=x2; gg=c2; bb=0; }
+        else if (hue < 180) { rr=0;  gg=c2; bb=x2; }
+        else if (hue < 240) { rr=0;  gg=x2; bb=c2; }
+        r = Math.floor((rr+m2)*255);
+        g = Math.floor((gg+m2)*255);
+        b = Math.floor((bb+m2)*255);
+        alpha = fade * (0.5 + effectiveGlow * 0.5);
+      }
+
+      ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+      ctx.fillText(col.chars[j], col.x, cy);
+    }
+
+    // Colonne sortie du bas → réinitialiser
+    if (col.y - col.chars.length * colFontSize2 > H) {
+      // Désactiver et laisser la densité décider de la réapparition
+      col.active = false;
+    }
+  });
+
+  // Spawn de nouvelles colonnes selon densité
+  columns.forEach((col, ci) => {
+    if (!col.active && Math.random() < effectiveDensity * dt * 60) {
+      columns[ci] = makeColumn(ci, false);
+    }
+  });
+
+  // Lueur verte globale en état speak / forte audio
+  if (audioLevel > 0.1 || STATE === 'speak') {
+    const glowAlpha = (audioLevel * 0.12 + (STATE === 'speak' ? 0.04 : 0)) * effectiveGlow;
+    const grad = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.7);
+    grad.addColorStop(0, `hsla(${curColorH},100%,40%,${glowAlpha})`);
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  DRAG
+// ═══════════════════════════════════════════════
+let isDragging=false, dragX=0, dragY=0;
+cv.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  isDragging = true; dragX = e.screenX; dragY = e.screenY;
+});
+window.addEventListener('mousemove', e => {
+  if (!isDragging) return;
+  if (window.avatarBridge?.moveWindow)
+    window.avatarBridge.moveWindow(e.screenX - dragX, e.screenY - dragY);
+  dragX = e.screenX; dragY = e.screenY;
+});
+window.addEventListener('mouseup',  () => isDragging = false);
+
+// Double-clic : bascule plein écran (entrée ET sortie gérées côté Electron)
+cv.addEventListener('dblclick', () => {
+  if (window.avatarBridge?.toggleFullscreen) window.avatarBridge.toggleFullscreen();
+});
+
+// Clic droit : idem
+cv.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (window.avatarBridge?.toggleFullscreen) window.avatarBridge.toggleFullscreen();
+});
+
+window.addEventListener('blur', () => { if (window.avatarBridge) window.avatarBridge.sendToBack(); });
+
+// ═══════════════════════════════════════════════
+//  ÉTAT AVATAR
+// ═══════════════════════════════════════════════
+function setState(s) {
+  STATE = s;
+  const cfg = STATES[s] || STATES.idle;
+  tgtSpeed   = cfg.speedBase;
+  tgtDensity = cfg.density;
+  tgtGlow    = cfg.glowIntensity;
+  tgtTrail   = cfg.trailLength;
+  tgtColorH  = cfg.colorH;
+
+  if (s === 'listen')     startAudio(null);
+  else if (s === 'speak') startAudio(loopbackId || null);
+  else                    startAudio(null);
+}
+
+if (window.avatarBridge) {
+  window.avatarBridge.onState(setState);
+}
+window.addEventListener('message', e => { if (e.data?.orbState) setState(e.data.orbState); });
+document.addEventListener('keydown', e => {
+  if      (e.key === '1') setState('idle');
+  else if (e.key === '2') setState('listen');
+  else if (e.key === '3') setState('speak');
+});
+window.addEventListener('load',         () => setTimeout(() => setState('idle'), 600));
+window.addEventListener('pointerdown',  () => {
+  if (audioCtx?.state === 'suspended') audioCtx.resume();
+});
+window.addEventListener('beforeunload', stopAudio);
+
+resize();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
