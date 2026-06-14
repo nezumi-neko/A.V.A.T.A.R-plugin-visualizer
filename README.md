@@ -11,7 +11,8 @@ Dix styles d'orbe sont disponibles, allant de la sphère WebGL au visualiseur Ma
 
 ## Prévisualisation
 
-Une page de prévisualisation interactive est disponible : **[preview.html]([../../core/plugins/visualizer/preview.html](https://github.com/nezumi-neko/A.V.A.T.A.R-plugin-visualizer/blob/main/visualizer/preview.html)**
+Une page de prévisualisation interactive est disponible : 
+<img width="1337" height="1740" alt="image" src="https://github.com/user-attachments/assets/c86ef0a4-1202-4141-9bd1-7b7a92c1beec" />
 
 Elle affiche les 10 orbes en miniature avec animation en temps réel, et un lien direct pour ouvrir chaque orbe en plein écran dans le navigateur.
 
